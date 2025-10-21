@@ -8,6 +8,11 @@ import torch
 from transformers import BloomTokenizerFast, BloomModel, BloomForCausalLM
 from accelerate import Accelerator
 
+# Load environment variables from a .env file
+from dotenv import load_dotenv
+load_dotenv()
+
+
 parser = argparse.ArgumentParser(description='Generate extra questions based on claims with a prompt. Useful for searching.')
 parser.add_argument('--reference_corpus', default="data/train.json", help='')
 parser.add_argument('--target_file', default="data/dev.json", help='')
