@@ -50,8 +50,9 @@ if args.resume != "":
 if not os.path.exists(args.store_folder):
     os.makedirs(args.store_folder)
 
-api_key = "YOUR_GOOGLE_CSE_API_KEY"
-search_engine_id = "YOUR_CSE_ID"
+# Load API keys from environment variables
+api_key = os.getenv("GOOGLE_CSE_API_KEY")
+search_engine_id = os.getenv("SEARCH_ENGINE_ID")
 
 start_idx = 0
 misinfo_list_file = args.misinfo_file
