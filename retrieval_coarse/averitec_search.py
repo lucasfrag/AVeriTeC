@@ -17,6 +17,14 @@ import threading
 import gc
 import os
 
+# Load environment variables from a .env file
+from dotenv import load_dotenv
+load_dotenv()
+
+# Download NLTK data
+import nltk
+nltk.download('averaged_perceptron_tagger')
+
 parser = argparse.ArgumentParser(description='Download and store search pages for FCB files.')
 parser.add_argument('--averitec_file', default="data/dev.generated_questions.json", help='')
 parser.add_argument('--misinfo_file', default="data/misinfo_list.txt", help='')
