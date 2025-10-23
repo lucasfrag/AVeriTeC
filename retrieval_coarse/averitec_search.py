@@ -1,290 +1,255 @@
-import argparse
-from time import sleep
-import pandas as pd
-import tqdm
-from googleapiclient.discovery import build
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Google Search Retriever (versão robusta)
+----------------------------------------
+Busca documentos na web com base em claims do Averitec,
+usando Google Custom Search API, multiprocessamento seguro
+e salvamento limpo de resultados.
+"""
+
 import argparse
 import json
-from bs4 import BeautifulSoup
-import requests
+import os
+import gc
+import tqdm
+import pandas as pd
+from time import sleep
 from urllib.parse import urlparse
-import requests
-import io
-from bs4 import BeautifulSoup
+from googleapiclient.discovery import build
 from html2lines import url2lines
 from nltk import pos_tag, word_tokenize
-import threading
-import gc
-import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# Load environment variables from a .env file
-#from dotenv import load_dotenv
-#load_dotenv()
-
-# Download NLTK data
-#import nltk
-#nltk.download('punkt', quiet=True, raise_on_error=False)
-#nltk.download('averaged_perceptron_tagger', quiet=True, raise_on_error=False)
-
-parser = argparse.ArgumentParser(description='Download and store search pages for FCB files.')
-parser.add_argument('--averitec_file', default="data/dev.generated_questions.json", help='')
-parser.add_argument('--misinfo_file', default="data/misinfo_list.txt", help='')
-parser.add_argument('--n_pages', default=3, help='')
-parser.add_argument('--store_folder', default="store/retrieved_docs", help='')
-parser.add_argument('--start_idx', default=0, type=int, help='Which claim to start at. Useful for larger corpus.')
-parser.add_argument('--n_to_compute', default=-1, type=int, help='How many claims to work through. Useful for larger corpus.')
-parser.add_argument('--resume', default="", help='Resume work from a particular file. Useful for larger corpus.')
+# ============================================================
+# Configuração de argumentos
+# ============================================================
+parser = argparse.ArgumentParser(description="Download and store search pages for FCB files.")
+parser.add_argument("--averitec_file", default="data/dev.generated_questions.json", help="Arquivo JSON com claims.")
+parser.add_argument("--misinfo_file", default="data/misinfo_list.txt", help="Lista de sites desinformativos.")
+parser.add_argument("--n_pages", default=3, type=int, help="Número de páginas de resultados por busca.")
+parser.add_argument("--store_folder", default="store/retrieved_docs", help="Diretório para armazenar os arquivos.")
+parser.add_argument("--start_idx", default=0, type=int, help="Índice inicial (para grandes corpora).")
+parser.add_argument("--n_to_compute", default=-1, type=int, help="Número de claims a processar (-1 = todos).")
+parser.add_argument("--resume", default="", help="Arquivo de progresso para retomar execução.")
 args = parser.parse_args()
 
-existing = {}
-first = True
-if args.resume != "":
-    next_claim = {"claim": None}
-    for line in open(args.resume, "r"):
-        # skip the first line
-        if first:
-            first = False
-            continue
-
-        parts = line.strip().split("\t")
-        claim = parts[1]
-
-        if claim != next_claim["claim"]: # Bit of a hack but I am intertionally causing a fencepost error here to rebuild the last claim, as we do not know if it was finished or not
-            if next_claim["claim"] is not None:
-                existing[next_claim["claim"]] = next_claim
-            next_claim = {"claim": claim, "lines": []}
-
-        next_claim["lines"].append(line.strip())
-
+# ============================================================
+# Pastas e arquivos
+# ============================================================
 if not os.path.exists(args.store_folder):
     os.makedirs(args.store_folder)
 
-# Load API keys from environment variables
-api_key = "AIzaSyAMgvRmIRDjXPsDiIELAeqwdX7zEOHpoIg"
-search_engine_id = "6207c4cbcfc394937"
-
-start_idx = 0
-misinfo_list_file = args.misinfo_file
 misinfo_list = []
+if os.path.exists(args.misinfo_file):
+    with open(args.misinfo_file, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                misinfo_list.append(line.strip().lower())
+else:
+    print(f"[WARN] Arquivo {args.misinfo_file} não encontrado. Continuando sem blacklist adicional.")
 
-blacklist = [
-    "jstor.org", # Blacklisted because their pdfs are not labelled as such, and clog up the download
-    "facebook.com", # Blacklisted because only post titles can be scraped, but the scraper doesn't know this,
-    "ftp.cs.princeton.edu", # Blacklisted because it hosts many large NLP corpora that keep showing up
+# ============================================================
+# Configuração de API
+# ============================================================
+api_key = os.getenv("GOOGLE_CSE_API_KEY", "AIzaSyAMgvRmIRDjXPsDiIELAeqwdX7zEOHpoIg")
+search_engine_id = os.getenv("SEARCH_ENGINE_ID", "6207c4cbcfc394937")
+
+# ============================================================
+# Blacklists
+# ============================================================
+blacklist_domains = [
+    "jstor.org",
+    "facebook.com",
+    "ftp.cs.princeton.edu",
     "nlp.cs.princeton.edu",
-    "huggingface.co"
+    "huggingface.co",
 ]
 
-blacklist_files = [ # Blacklisted some NLP nonsense that crashes my machine with OOM errors
-    "/glove.", 
+blacklist_files = [
+    "/glove.",
     "ftp://ftp.cs.princeton.edu/pub/cs226/autocomplete/words-333333.txt",
     "https://web.mit.edu/adamrose/Public/googlelist",
 ]
 
-
-for line in open(misinfo_list_file, "r"):
-    if line.strip():
-        misinfo_list.append(line.strip().lower())
-
-def get_domain_name(url):
-    if '://' not in url:
-        url = 'http://' + url
-
+# ============================================================
+# Utilitários
+# ============================================================
+def get_domain_name(url: str) -> str:
+    if "://" not in url:
+        url = "http://" + url
     domain = urlparse(url).netloc
-
-    if domain.startswith("www."):
-        return domain[4:]
-    else:
-        return domain
+    return domain[4:] if domain.startswith("www.") else domain
 
 def google_search(search_term, api_key, cse_id, **kwargs):
     service = build("customsearch", "v1", developerKey=api_key)
     res = service.cse().list(q=search_term, cx=cse_id, **kwargs).execute()
-
-    if "items" in res:
-        return res['items']
-    else:
-        return []
-
-pages = 0
-a_pages = 0
-found_pages = 0
-found_pages_1hop = 0
-n_pages = 0
-
-with open(args.averitec_file) as f:
-    j = json.load(f)
-    examples = j
+    return res.get("items", [])
 
 def string_to_search_query(text, author):
     parts = word_tokenize(text.strip())
     tags = pos_tag(parts)
-
     keep_tags = ["CD", "JJ", "NN", "VB"]
 
-    if author is not None:
-        search_string = author.split()
-    else:
-        search_string = []
-
+    search_string = author.split() if author else []
     for token, tag in zip(parts, tags):
-        for keep_tag in keep_tags:
-            if tag[1].startswith(keep_tag):
-                search_string.append(token)
-
-    search_string = " ".join(search_string)
-    return search_string
+        if any(tag[1].startswith(k) for k in keep_tags):
+            search_string.append(token)
+    return " ".join(search_string)
 
 def get_google_search_results(api_key, search_engine_id, google_search, sort_date, search_string, page=0):
-    search_results = []
-    for i in range(3):
+    for _ in range(3):
         try:
-            search_results += google_search(
-            search_string,
-            api_key,
-            search_engine_id,
-            num=10,
-            start=0 + 10 * page,
-            sort="date:r:19000101:"+sort_date,
-            dateRestrict=None,
-            gl="US"
+            return google_search(
+                search_string,
+                api_key,
+                search_engine_id,
+                num=10,
+                start=0 + 10 * page,
+                sort=f"date:r:19000101:{sort_date}",
+                dateRestrict=None,
+                gl="US",
             )
-            break
-        except:
+        except Exception:
             sleep(3)
+    return []
 
-    return search_results
-
-def get_and_store(url_link, fp, worker):
+# ============================================================
+# Função executada em subprocessos
+# ============================================================
+def get_and_store(url_link, fp):
+    """Roda em subprocesso isolado; salva texto extraído de uma URL."""
     try:
         page_lines = url2lines(url_link)
+        if not isinstance(page_lines, list):
+            page_lines = [str(page_lines)]
+        with open(fp, "w", encoding="utf-8") as out_f:
+            out_f.write("\n".join([url_link] + page_lines))
+        return (fp, url_link, True, "ok")
+    except Exception as e:
+        return (fp, url_link, False, f"{type(e).__name__}: {e}")
 
-        with open(fp, "w") as out_f:
-            print("\n".join([url_link] + page_lines), file=out_f)   
+# ============================================================
+# Carrega arquivo principal
+# ============================================================
+with open(args.averitec_file, "r", encoding="utf-8") as f:
+    examples = json.load(f)
 
-        worker_stack.append(worker)  
-        gc.collect()
-    except ValueError as e:
-        if "signal only works in main thread" in str(e):
-            print(f"[WARN] Pulando {url_link} (erro de signal em thread)")
-        else:
-            raise    
+existing = {}
+if args.resume:
+    first = True
+    next_claim = {"claim": None}
+    for line in open(args.resume, "r", encoding="utf-8"):
+        if first:
+            first = False
+            continue
+        parts = line.strip().split("\t")
+        claim = parts[1]
+        if claim != next_claim["claim"]:
+            if next_claim["claim"]:
+                existing[next_claim["claim"]] = next_claim
+            next_claim = {"claim": claim, "lines": []}
+        next_claim["lines"].append(line.strip())
 
-line = ["index", "claim", "link", "page", "search_string", "search_type", "store_file"]
-line = "\t".join(line)
-print(line)
+# ============================================================
+# Loop principal
+# ============================================================
+print("\t".join(["index", "claim", "link", "page", "search_string", "search_type", "store_file"]))
 
-worker_stack = list(range(10))
+start_idx = args.start_idx
+end_idx = None if args.n_to_compute == -1 else args.start_idx + args.n_to_compute
+MAX_WORKERS = 8  # ajuste conforme sua CPU/memória
 
-end_idx = -1
-if args.n_to_compute != -1:
-    end_idx = args.start_idx+args.n_to_compute
+with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    future_to_meta = {}
 
-index = args.start_idx -1
-for _, example in tqdm.tqdm(list(enumerate(examples[args.start_idx:end_idx]))):
-    index += 1
-    claim = example["claim"]
-
-    # If we already have this claim in the file we are resuming from, skip it
-    if claim in existing:
-        for line in existing[claim]["lines"]:
-            print(line)
-        continue
-
-    #speaker = example["speaker"].strip() if example["speaker"] else None
-    speaker = (example.get("speaker") or "").strip() or None
-    questions = [q["question"] for q in example["questions"]]
-
-    try:
-        year, month, date = example["check_date"].split("-")
-    except:
-        month, date, year = "01", "01", "2022"
-    
-    if len(year) == 2 and int(year) <= 30:
-        year = "20" + year
-    elif len(year) == 2:
-        year = "19" + year
-    elif len(year) == 1:
-        year = "200" + year
-
-    if len(month) == 1:
-        month = "0" + month
-    
-    if len(date) == 1:
-        date = "0" + date
-
-    sort_date = year + month + date
-    
-    search_strings = []
-    search_types = []
-
-    if speaker is not None:
-        search_string = string_to_search_query(claim, speaker)
-        search_strings.append(search_string)
-        search_types += ["claim+author"]
-
-    search_string_2 = string_to_search_query(claim, None)
-    
-    search_strings += [
-        search_string_2,
-        claim,
-        ]
-
-    search_types += [
-        "claim",
-        "claim-noformat",
-        ]
-
-    search_strings += questions
-    search_types += ["question" for _ in questions]
-
-    search_results = []
-    visited = {}
-    
-    store_counter = 0
-    ts = []
-    for this_search_string, this_search_type in zip(search_strings, search_types):
-        for page_num in range(args.n_pages):
-            search_results = get_google_search_results(api_key, search_engine_id, google_search, sort_date, this_search_string, page=page_num)
-
-            for result in search_results:
-                link = str(result["link"])
-
-                domain = get_domain_name(link)
-
-                if domain in blacklist:
-                    continue
-
-                broken = False
-                for b_file in blacklist_files:
-                    if b_file in link:
-                        broken = True
-        
-                if broken:
-                    continue
-
-                if link.endswith(".pdf") or link.endswith(".doc"):
-                    continue
-
-                store_file_path = ""
-
-                if link in visited:
-                    store_file_path = visited[link]
-                else:
-                    store_counter += 1
-
-                    store_file_path = args.store_folder + "/search_result_" + str(index) + "_" + str(store_counter) + ".store"
-                    visited[link] = store_file_path 
-
-                    while len(worker_stack) == 0: # Wait for a wrrker to become available. Check every second.
-                        sleep(1)
-
-                    worker = worker_stack.pop()
-
-                    t = threading.Thread(target=get_and_store, args=(link, store_file_path, worker))
-                    t.start()
-                            
-    
-                line = [str(index), claim, link, str(page_num), this_search_string, this_search_type, store_file_path]
-                line = "\t".join(line)
+    for idx, example in tqdm.tqdm(enumerate(examples[start_idx:end_idx], start=start_idx)):
+        claim = example["claim"]
+        if claim in existing:
+            for line in existing[claim]["lines"]:
                 print(line)
+            continue
+
+        speaker = (example.get("speaker") or "").strip() or None
+        questions = [q["question"] for q in example.get("questions", [])]
+
+        # Normaliza data
+        try:
+            year, month, date = example["check_date"].split("-")
+        except Exception:
+            month, date, year = "01", "01", "2022"
+
+        if len(year) == 2:
+            year = ("20" if int(year) <= 30 else "19") + year
+        elif len(year) == 1:
+            year = "200" + year
+        if len(month) == 1:
+            month = "0" + month
+        if len(date) == 1:
+            date = "0" + date
+
+        sort_date = year + month + date
+
+        # Gera termos de busca
+        search_strings = []
+        search_types = []
+
+        if speaker:
+            search_strings.append(string_to_search_query(claim, speaker))
+            search_types.append("claim+author")
+
+        search_strings += [string_to_search_query(claim, None), claim]
+        search_types += ["claim", "claim-noformat"]
+
+        search_strings += questions
+        search_types += ["question"] * len(questions)
+
+        visited = {}
+        store_counter = 0
+
+        for this_search_string, this_search_type in zip(search_strings, search_types):
+            for page_num in range(args.n_pages):
+                results = get_google_search_results(
+                    api_key, search_engine_id, google_search, sort_date, this_search_string, page=page_num
+                )
+                for result in results:
+                    link = str(result.get("link", ""))
+                    if not link:
+                        continue
+
+                    domain = get_domain_name(link)
+                    if domain in blacklist_domains:
+                        continue
+                    if any(bf in link for bf in blacklist_files):
+                        continue
+                    if link.lower().endswith((".pdf", ".doc", ".docx")):
+                        continue
+
+                    if link in visited:
+                        store_file_path = visited[link]
+                    else:
+                        store_counter += 1
+                        store_file_path = os.path.join(args.store_folder, f"search_result_{idx}_{store_counter}.store")
+                        visited[link] = store_file_path
+
+                        fut = executor.submit(get_and_store, link, store_file_path)
+                        future_to_meta[fut] = (idx, claim, page_num, this_search_string, this_search_type, store_file_path)
+
+                    # imprime resultado
+                    print("\t".join([str(idx), claim, link, str(page_num), this_search_string, this_search_type, visited[link]]))
+
+    # Espera terminar todos os downloads
+    for fut in as_completed(future_to_meta):
+        idx, claim, pnum, sstr, stype, store_fp = future_to_meta[fut]
+        try:
+            fp, url, ok, msg = fut.result()
+            if ok:
+                print(f"[OK] {idx} | {url} -> salvo em {fp}")
+            else:
+                print(f"[FAIL] {idx} | {url} -> {msg}")
+        except Exception as e:
+            print(f"[EXC] {idx} | {store_fp} -> {e}")
+
+gc.collect()
+print("✅ Finalizado com sucesso.")
