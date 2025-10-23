@@ -98,7 +98,7 @@ with open(args.url_file) as url_file:
 # Define the bloom model:
 accelerator = Accelerator()
 accel_device = accelerator.device
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
+device = "cuda:3" if torch.cuda.is_available() else "cpu"
 tokenizer = BloomTokenizerFast.from_pretrained("bigscience/bloom-7b1")
 model = BloomForCausalLM.from_pretrained(
     "bigscience/bloom-7b1",
