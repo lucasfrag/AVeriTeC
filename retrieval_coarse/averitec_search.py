@@ -18,12 +18,13 @@ import gc
 import os
 
 # Load environment variables from a .env file
-from dotenv import load_dotenv
-load_dotenv()
+#from dotenv import load_dotenv
+#load_dotenv()
 
 # Download NLTK data
-import nltk
-nltk.download('averaged_perceptron_tagger')
+#import nltk
+#nltk.download('punkt', quiet=True, raise_on_error=False)
+#nltk.download('averaged_perceptron_tagger', quiet=True, raise_on_error=False)
 
 parser = argparse.ArgumentParser(description='Download and store search pages for FCB files.')
 parser.add_argument('--averitec_file', default="data/dev.generated_questions.json", help='')
@@ -59,8 +60,8 @@ if not os.path.exists(args.store_folder):
     os.makedirs(args.store_folder)
 
 # Load API keys from environment variables
-api_key = os.getenv("GOOGLE_CSE_API_KEY")
-search_engine_id = os.getenv("SEARCH_ENGINE_ID")
+api_key = "AIzaSyAMgvRmIRDjXPsDiIELAeqwdX7zEOHpoIg"
+search_engine_id = "6207c4cbcfc394937"
 
 start_idx = 0
 misinfo_list_file = args.misinfo_file
@@ -155,13 +156,19 @@ def get_google_search_results(api_key, search_engine_id, google_search, sort_dat
     return search_results
 
 def get_and_store(url_link, fp, worker):
-    page_lines = url2lines(url_link)
+    try:
+        page_lines = url2lines(url_link)
 
-    with open(fp, "w") as out_f:
-        print("\n".join([url_link] + page_lines), file=out_f)   
+        with open(fp, "w") as out_f:
+            print("\n".join([url_link] + page_lines), file=out_f)   
 
-    worker_stack.append(worker)  
-    gc.collect()
+        worker_stack.append(worker)  
+        gc.collect()
+    except ValueError as e:
+        if "signal only works in main thread" in str(e):
+            print(f"[WARN] Pulando {url_link} (erro de signal em thread)")
+        else:
+            raise    
 
 line = ["index", "claim", "link", "page", "search_string", "search_type", "store_file"]
 line = "\t".join(line)
@@ -184,8 +191,8 @@ for _, example in tqdm.tqdm(list(enumerate(examples[args.start_idx:end_idx]))):
             print(line)
         continue
 
-    speaker = example["speaker"].strip() if example["speaker"] else None
-
+    #speaker = example["speaker"].strip() if example["speaker"] else None
+    speaker = (example.get("speaker") or "").strip() or None
     questions = [q["question"] for q in example["questions"]]
 
     try:
