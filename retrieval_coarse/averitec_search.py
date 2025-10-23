@@ -240,16 +240,16 @@ with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
                     print("\t".join([str(idx), claim, link, str(page_num), this_search_string, this_search_type, visited[link]]))
 
     # Espera terminar todos os downloads
-    for fut in as_completed(future_to_meta):
-        idx, claim, pnum, sstr, stype, store_fp = future_to_meta[fut]
-        try:
-            fp, url, ok, msg = fut.result()
-            if ok:
-                print(f"[OK] {idx} | {url} -> salvo em {fp}")
-            else:
-                print(f"[FAIL] {idx} | {url} -> {msg}")
-        except Exception as e:
-            print(f"[EXC] {idx} | {store_fp} -> {e}")
+    #for fut in as_completed(future_to_meta):
+    #    idx, claim, pnum, sstr, stype, store_fp = future_to_meta[fut]
+    #    try:
+    #        fp, url, ok, msg = fut.result()
+    #        if ok:
+    #            #print(f"[OK] {idx} | {url} -> salvo em {fp}")
+    #        else:
+    #            #print(f"[FAIL] {idx} | {url} -> {msg}")
+    #    except Exception as e:
+    #        #print(f"[EXC] {idx} | {store_fp} -> {e}")
 
 gc.collect()
-print("✅ Finalizado com sucesso.")
+#print("✅ Finalizado com sucesso.")
