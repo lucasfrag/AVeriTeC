@@ -62,7 +62,21 @@ def html2lines(page):
     if len(page.strip()) == 0 or page is None:
         return out_lines
 
-    text = trafilatura.extract(page, config=DEFAULT_CONFIG)
+    #text = trafilatura.extract(page, config=DEFAULT_CONFIG)
+
+    from trafilatura.settings import use_config
+
+    # Cria uma configuração sem timeout (impede o uso de signal)
+    DEFAULT_CONFIG = use_config()
+    DEFAULT_CONFIG.set("DEFAULT", "EXTRACTION_TIMEOUT", "0")
+
+    text = trafilatura.extract(
+        page,
+        config=DEFAULT_CONFIG,
+        include_comments=False,
+        no_fallback=True
+    )
+
     reset_caches()
 
     if text is None:
